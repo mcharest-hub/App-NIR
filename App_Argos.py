@@ -11,6 +11,9 @@ import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
+import folium
+from streamlit_folium import st_folium
+
 # ========== Préprocessing optionnel ==========
 sys.path.append(r"C:\Users\mcharest\Documents\Doctorat\python_scripts")
 try:
@@ -768,13 +771,55 @@ def render_cluster_detail_section(payload: Optional[dict] = None) -> None:
                     get_fill_color="_rgb",
                     pickable=True,
                 )
+                # --- Construction de la carte avec fallback Mapbox/OSM ---
+                layers = []
+                if BASEMAP_LAYER is not None:
+                    layers.append(BASEMAP_LAYER)  # ajoute le fond OSM si pas de token
+                layers.append(points_layer)  # ta couche de points ou heatmap
+
                 deck = pdk.Deck(
-                    layers=[layer],
+                    layers=layers,
                     initial_view_state=view_state,
-                    map_style="mapbox://styles/mapbox/light-v9",
-                    tooltip={"html": tooltip_html} if tooltip_html else None,
+                    map_style=MAP_STYLE_ACTIVE,  # Mapbox si token, sinon None
+                    tooltip=(
+                        {"html": tooltip_html} if "tooltip_html" in locals() else None
+                    ),
                 )
-                st.pydeck_chart(deck, use_container_width=True, height=520)
+
+                # ---------- Carte sans Mapbox ----------
+                st.subheader("Carte des échantillons (OpenStreetMap)")
+
+                # Vérifie que les colonnes latitude/longitude existent
+                if "latitude" in out_vm.columns and "longitude" in out_vm.columns:
+                    # Calcul du centre de la carte
+                    lat_center = out_vm["latitude"].mean()
+                    lon_center = out_vm["longitude"].mean()
+
+                    # Crée la carte Folium
+                    m = folium.Map(
+                        location=[lat_center, lon_center],
+                        zoom_start=6,
+                        tiles="OpenStreetMap",
+                    )
+
+                    # Ajoute les points
+                    for _, row in out_vm.iterrows():
+                        folium.CircleMarker(
+                            location=[row["latitude"], row["longitude"]],
+                            radius=5,
+                            color="blue",
+                            fill=True,
+                            fill_opacity=0.6,
+                            popup=str(row.get("sample_name", "Inconnu")),
+                        ).add_to(m)
+
+                    # Affiche la carte dans Streamlit
+                    st_folium(m, width=900, height=600)
+                else:
+                    st.warning(
+                        "Colonnes 'latitude' et 'longitude' introuvables dans le dataset."
+                    )
+                # -----------------------------------------------------------
 
 
 # ========== Navigation ==========
@@ -1998,12 +2043,20 @@ elif page == "Valises marocaines":
             try:
                 frames.append(pd.read_excel(xls_file, sheet_name=sh))
             except Exception as e:
-                st.warning(f"Feuille '{sh}' illisible ({getattr(xls_file, 'io', 'fichier')}) : {e}")
-        return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+                st.warning(
+                    f"Feuille '{sh}' illisible ({getattr(xls_file, 'io', 'fichier')}) : {e}"
+                )
+        return (
+            pd.concat(frames, ignore_index=True, sort=False)
+            if frames
+            else pd.DataFrame()
+        )
 
     vm_imported_frames = []
     if vm_uploaded_files:
-        st.info("Sélectionne les feuilles à utiliser pour chaque fichier (par défaut : toutes).")
+        st.info(
+            "Sélectionne les feuilles à utiliser pour chaque fichier (par défaut : toutes)."
+        )
         for i, f in enumerate(vm_uploaded_files):
             try:
                 xls = pd.ExcelFile(f)
@@ -2035,12 +2088,14 @@ elif page == "Valises marocaines":
         with c1:
             st.markdown(
                 f'<div class="kpi-card"><div class="kpi-label">Lignes importées</div>'
-                f'<div class="kpi-value">{len(vm_df):,}</div></div>', unsafe_allow_html=True
+                f'<div class="kpi-value">{len(vm_df):,}</div></div>',
+                unsafe_allow_html=True,
             )
         with c2:
             st.markdown(
                 f'<div class="kpi-card"><div class="kpi-label">Colonnes</div>'
-                f'<div class="kpi-value">{len(vm_df.columns):,}</div></div>', unsafe_allow_html=True
+                f'<div class="kpi-value">{len(vm_df.columns):,}</div></div>',
+                unsafe_allow_html=True,
             )
         with st.expander("Aperçu des données importées"):
             st.dataframe(vm_df, use_container_width=True, height=360)
@@ -2074,7 +2129,8 @@ elif page == "Valises marocaines":
             st.session_state.setdefault("vm_cut_range", (lo, hi))
             st.slider(
                 "Plage (longueurs d’onde)",
-                int(wl_min), int(wl_max),
+                int(wl_min),
+                int(wl_max),
                 st.session_state["vm_cut_range"],
                 key="vm_cut_range",
             )
@@ -2088,8 +2144,14 @@ elif page == "Valises marocaines":
 
     vm_out = vm_df.copy()
 
-    def _vm_replace_spectra(df_in: pd.DataFrame, new_spec: pd.DataFrame) -> pd.DataFrame:
-        non_spec = [c for c in df_in.columns if not (isinstance(c, str) and c.startswith("spectrum_"))]
+    def _vm_replace_spectra(
+        df_in: pd.DataFrame, new_spec: pd.DataFrame
+    ) -> pd.DataFrame:
+        non_spec = [
+            c
+            for c in df_in.columns
+            if not (isinstance(c, str) and c.startswith("spectrum_"))
+        ]
         return pd.concat(
             [df_in[non_spec].reset_index(drop=True), new_spec.reset_index(drop=True)],
             axis=1,
@@ -2100,25 +2162,39 @@ elif page == "Valises marocaines":
         if not now_cols:
             st.warning("Prétraitements ignorés : aucune colonne spectrale détectée.")
         else:
-            if ("SG dérivée 2" in vm_pipeline or "SNV" in vm_pipeline) and (apply_savgol is None or apply_snv is None):
-                st.error("Module 'preprocessing.py' introuvable — SG/SNV indisponibles.")
+            if ("SG dérivée 2" in vm_pipeline or "SNV" in vm_pipeline) and (
+                apply_savgol is None or apply_snv is None
+            ):
+                st.error(
+                    "Module 'preprocessing.py' introuvable — SG/SNV indisponibles."
+                )
             else:
                 for step in vm_pipeline:
                     now_cols, now_wls = _get_spectrum_cols(vm_out)
                     if not now_cols:
-                        st.error("Plus aucune colonne spectrale détectée pendant le pipeline.")
+                        st.error(
+                            "Plus aucune colonne spectrale détectée pendant le pipeline."
+                        )
                         st.stop()
                     spec = vm_out[now_cols].copy()
 
                     if step == "Découpe":
                         wl_lo, wl_hi = st.session_state["vm_cut_range"]
-                        keep = [c for c in now_cols if (now_wls[c] >= wl_lo and now_wls[c] <= wl_hi)]
+                        keep = [
+                            c
+                            for c in now_cols
+                            if (now_wls[c] >= wl_lo and now_wls[c] <= wl_hi)
+                        ]
                         if not keep:
-                            st.error("Découpe trop restrictive : aucune colonne conservée.")
+                            st.error(
+                                "Découpe trop restrictive : aucune colonne conservée."
+                            )
                             st.stop()
                         spec = spec[keep]
                         vm_out = _vm_replace_spectra(vm_out, spec)
-                        st.caption(f"✔️ Découpe {wl_lo}–{wl_hi} nm ({len(keep)} colonnes).")
+                        st.caption(
+                            f"✔️ Découpe {wl_lo}–{wl_hi} nm ({len(keep)} colonnes)."
+                        )
 
                     elif step == "SG dérivée 2":
                         spec = apply_savgol(
@@ -2129,7 +2205,9 @@ elif page == "Valises marocaines":
                         )
                         spec.columns = now_cols[: spec.shape[1]]
                         vm_out = _vm_replace_spectra(vm_out, spec)
-                        st.caption(f"✔️ SG dérivée 2 (fenêtre={st.session_state['vm_sg_window']}, ordre={st.session_state['vm_sg_poly']}).")
+                        st.caption(
+                            f"✔️ SG dérivée 2 (fenêtre={st.session_state['vm_sg_window']}, ordre={st.session_state['vm_sg_poly']})."
+                        )
 
                     elif step == "SNV":
                         spec = apply_snv(spec)
@@ -2169,8 +2247,10 @@ elif page == "Valises marocaines":
         st.stop()
 
     vm_sample_col = _find_col(["sample_name", "Sample"], vm_out.columns)
-    vm_namex_col  = _find_col(["name_x", "substance", "substance_name", "drug"], vm_out.columns)
-    vm_date_col   = _find_col(["seizure_date", "date"], vm_out.columns)
+    vm_namex_col = _find_col(
+        ["name_x", "substance", "substance_name", "drug"], vm_out.columns
+    )
+    vm_date_col = _find_col(["seizure_date", "date"], vm_out.columns)
     vm_style_attrs = ["Localisation", "Lot", "Savonnette", "Logo", "sample_name"]
 
     vm_method = st.radio("Méthode", ["PCA", "t-SNE"], horizontal=True, key="vm_method")
@@ -2178,22 +2258,37 @@ elif page == "Valises marocaines":
     c1, c2, c3 = st.columns(3)
     with c1:
         if vm_method == "PCA":
-            vm_n_comp = st.slider("Composantes (PCA)", 2, min(10, len(vm_spec_cols_pca)), 5, 1, key="vm_n_comp")
+            vm_n_comp = st.slider(
+                "Composantes (PCA)",
+                2,
+                min(10, len(vm_spec_cols_pca)),
+                5,
+                1,
+                key="vm_n_comp",
+            )
         else:
-            vm_n_comp_tsne = st.selectbox("Dimensions (t-SNE)", [2, 3], 0, key="vm_tsne_dim")
+            vm_n_comp_tsne = st.selectbox(
+                "Dimensions (t-SNE)", [2, 3], 0, key="vm_tsne_dim"
+            )
     with c2:
-        vm_avg_reps = st.checkbox("Moyenner par sample", value=bool(vm_sample_col), key="vm_avg_reps")
+        vm_avg_reps = st.checkbox(
+            "Moyenner par sample", value=bool(vm_sample_col), key="vm_avg_reps"
+        )
     with c3:
-        vm_point_size = st.slider("Taille des points", 40, 300, 160, 10, key="vm_point_size")
+        vm_point_size = st.slider(
+            "Taille des points", 40, 300, 160, 10, key="vm_point_size"
+        )
 
     if vm_method == "t-SNE":
         t1, t2, t3 = st.columns(3)
         with t1:
             vm_tsne_perp = st.slider("Perplexity", 5, 100, 30, 1, key="vm_tsne_perp")
         with t2:
-            vm_tsne_lr   = st.slider("Learning rate", 10, 2000, 200, 10, key="vm_tsne_lr")
+            vm_tsne_lr = st.slider("Learning rate", 10, 2000, 200, 10, key="vm_tsne_lr")
         with t3:
-            vm_tsne_iter = st.slider("Itérations", 250, 5000, 1000, 50, key="vm_tsne_iter")
+            vm_tsne_iter = st.slider(
+                "Itérations", 250, 5000, 1000, 50, key="vm_tsne_iter"
+            )
 
     vm_work = vm_out.copy()
     if "sample_name" not in vm_work.columns:
@@ -2203,33 +2298,62 @@ elif page == "Valises marocaines":
             vm_work["sample_name"] = "S" + vm_work.index.astype(str)
 
     if vm_avg_reps:
-        vm_X_mean = vm_work.groupby("sample_name", as_index=False)[vm_spec_cols_pca].mean(numeric_only=True)
-        attrs_present = [c for c in vm_style_attrs if c in vm_work.columns and c != "sample_name"]
+        vm_X_mean = vm_work.groupby("sample_name", as_index=False)[
+            vm_spec_cols_pca
+        ].mean(numeric_only=True)
+        attrs_present = [
+            c for c in vm_style_attrs if c in vm_work.columns and c != "sample_name"
+        ]
 
         def _first_non_null(s):
             s = s.dropna()
             return s.iloc[0] if not s.empty else None
 
         if attrs_present:
-            vm_A = vm_work.groupby("sample_name", as_index=False)[attrs_present].agg(_first_non_null)
+            vm_A = vm_work.groupby("sample_name", as_index=False)[attrs_present].agg(
+                _first_non_null
+            )
             vm_work2 = vm_X_mean.merge(vm_A, on="sample_name", how="left")
         else:
             vm_work2 = vm_X_mean.copy()
     else:
-        keep_attrs = [c for c in vm_style_attrs if c in vm_work.columns and c != "sample_name"]
+        keep_attrs = [
+            c for c in vm_style_attrs if c in vm_work.columns and c != "sample_name"
+        ]
         vm_work2 = pd.concat(
-            [vm_work[["sample_name"] + keep_attrs].reset_index(drop=True),
-             vm_work[vm_spec_cols_pca].reset_index(drop=True)],
+            [
+                vm_work[["sample_name"] + keep_attrs].reset_index(drop=True),
+                vm_work[vm_spec_cols_pca].reset_index(drop=True),
+            ],
             axis=1,
         ).loc[:, lambda df: ~df.columns.duplicated()]
 
-    if vm_namex_col and vm_namex_col in vm_out.columns and vm_namex_col not in vm_work2.columns:
-        vm_work2[vm_namex_col] = vm_out[vm_namex_col] if not vm_avg_reps else vm_out[["sample_name", vm_namex_col]].drop_duplicates("sample_name")[vm_namex_col].values
-    if vm_date_col and vm_date_col in vm_out.columns and vm_date_col not in vm_work2.columns:
+    if (
+        vm_namex_col
+        and vm_namex_col in vm_out.columns
+        and vm_namex_col not in vm_work2.columns
+    ):
+        vm_work2[vm_namex_col] = (
+            vm_out[vm_namex_col]
+            if not vm_avg_reps
+            else vm_out[["sample_name", vm_namex_col]]
+            .drop_duplicates("sample_name")[vm_namex_col]
+            .values
+        )
+    if (
+        vm_date_col
+        and vm_date_col in vm_out.columns
+        and vm_date_col not in vm_work2.columns
+    ):
         if vm_avg_reps:
             meta_dt = vm_out[["sample_name", vm_date_col]].copy()
             meta_dt[vm_date_col] = _parse_dates_series(meta_dt[vm_date_col])
-            meta_dt = meta_dt.dropna(subset=[vm_date_col]).sort_values(["sample_name", vm_date_col]).groupby("sample_name", as_index=False).tail(1)
+            meta_dt = (
+                meta_dt.dropna(subset=[vm_date_col])
+                .sort_values(["sample_name", vm_date_col])
+                .groupby("sample_name", as_index=False)
+                .tail(1)
+            )
             vm_work2 = vm_work2.merge(meta_dt, on="sample_name", how="left")
         else:
             vm_work2[vm_date_col] = vm_out[vm_date_col]
@@ -2237,7 +2361,9 @@ elif page == "Valises marocaines":
     X = vm_work2[vm_spec_cols_pca].apply(pd.to_numeric, errors="coerce")
     mask = X.notna().all(axis=1)
     if mask.sum() < 3:
-        st.warning("Analyse indisponible : moins de 3 lignes complètes après nettoyage.")
+        st.warning(
+            "Analyse indisponible : moins de 3 lignes complètes après nettoyage."
+        )
         st.stop()
     X = X.loc[mask]
     vm_work2 = vm_work2.loc[mask].reset_index(drop=True)
@@ -2248,7 +2374,7 @@ elif page == "Valises marocaines":
     if vm_method == "PCA":
         vm_pca = PCA(n_components=vm_n_comp, random_state=0)
         vm_scores = vm_pca.fit_transform(Xc)
-        vm_expl   = vm_pca.explained_variance_ratio_
+        vm_expl = vm_pca.explained_variance_ratio_
         comp_names = [f"PC{i}" for i in range(1, vm_n_comp + 1)]
     else:
         vm_tsne = TSNE(
@@ -2261,13 +2387,23 @@ elif page == "Valises marocaines":
             verbose=0,
         )
         vm_scores = vm_tsne.fit_transform(Xc)
-        vm_expl   = None
+        vm_expl = None
         comp_names = [f"tSNE{i}" for i in range(1, vm_n_comp_tsne + 1)]
 
-    attach_cols = list(dict.fromkeys([c for c in (vm_style_attrs + [vm_namex_col, vm_date_col]) if c and c in vm_work2.columns]))
+    attach_cols = list(
+        dict.fromkeys(
+            [
+                c
+                for c in (vm_style_attrs + [vm_namex_col, vm_date_col])
+                if c and c in vm_work2.columns
+            ]
+        )
+    )
     vm_scores_df = pd.concat(
-        [vm_work2[attach_cols].reset_index(drop=True),
-         pd.DataFrame(vm_scores, columns=comp_names)],
+        [
+            vm_work2[attach_cols].reset_index(drop=True),
+            pd.DataFrame(vm_scores, columns=comp_names),
+        ],
         axis=1,
     ).loc[:, lambda df: ~df.columns.duplicated()]
 
@@ -2276,37 +2412,66 @@ elif page == "Valises marocaines":
     with a1:
         vm_pc_x = st.selectbox("Axe X", comp_names, 0, key="vm_rd_x")
     with a2:
-        vm_pc_y = st.selectbox("Axe Y", comp_names, 1 if len(comp_names) > 1 else 0, key="vm_rd_y")
+        vm_pc_y = st.selectbox(
+            "Axe Y", comp_names, 1 if len(comp_names) > 1 else 0, key="vm_rd_y"
+        )
 
-    present_attrs = [c for c in ["Localisation", "Lot", "Savonnette", "Logo", "sample_name"] if c in vm_scores_df.columns]
+    present_attrs = [
+        c
+        for c in ["Localisation", "Lot", "Savonnette", "Logo", "sample_name"]
+        if c in vm_scores_df.columns
+    ]
+
     def _is_num(s: pd.Series) -> bool:
-        try: return pd.api.types.is_numeric_dtype(s)
-        except Exception: return False
+        try:
+            return pd.api.types.is_numeric_dtype(s)
+        except Exception:
+            return False
 
     ccol, cshape = st.columns(2)
     with ccol:
         vm_color_attr = st.selectbox(
-            "Couleur par…", ["(aucune)"] + present_attrs,
-            (present_attrs.index("Localisation")+1) if "Localisation" in present_attrs else 0,
+            "Couleur par…",
+            ["(aucune)"] + present_attrs,
+            (
+                (present_attrs.index("Localisation") + 1)
+                if "Localisation" in present_attrs
+                else 0
+            ),
             key="vm_rd_color_attr",
         )
     with cshape:
         cat_opts = [c for c in present_attrs if not _is_num(vm_scores_df[c])]
-        vm_shape_attr = st.selectbox("Forme par…", ["(aucune)"] + cat_opts, 0, key="vm_rd_shape_attr")
+        vm_shape_attr = st.selectbox(
+            "Forme par…", ["(aucune)"] + cat_opts, 0, key="vm_rd_shape_attr"
+        )
 
     tips = []
-    if "sample_name" in vm_scores_df.columns: tips.append(alt.Tooltip("sample_name:N", title="Sample"))
-    if vm_namex_col and vm_namex_col in vm_scores_df.columns: tips.append(alt.Tooltip(f"{vm_namex_col}:N", title="Substance"))
+    if "sample_name" in vm_scores_df.columns:
+        tips.append(alt.Tooltip("sample_name:N", title="Sample"))
+    if vm_namex_col and vm_namex_col in vm_scores_df.columns:
+        tips.append(alt.Tooltip(f"{vm_namex_col}:N", title="Substance"))
     if vm_date_col and vm_date_col in vm_scores_df.columns:
-        try: vm_scores_df[vm_date_col] = _parse_dates_series(vm_scores_df[vm_date_col])
-        except Exception: pass
+        try:
+            vm_scores_df[vm_date_col] = _parse_dates_series(vm_scores_df[vm_date_col])
+        except Exception:
+            pass
         tips.append(alt.Tooltip(f"{vm_date_col}:T", title="Date", format="%d/%m/%Y"))
     tips += [alt.Tooltip(f"{vm_pc_x}:Q"), alt.Tooltip(f"{vm_pc_y}:Q")]
 
-    color_enc = alt.value("#2563EB") if vm_color_attr == "(aucune)" else alt.Color(
-        f"{vm_color_attr}:{'Q' if _is_num(vm_scores_df[vm_color_attr]) else 'N'}", title=vm_color_attr
+    color_enc = (
+        alt.value("#2563EB")
+        if vm_color_attr == "(aucune)"
+        else alt.Color(
+            f"{vm_color_attr}:{'Q' if _is_num(vm_scores_df[vm_color_attr]) else 'N'}",
+            title=vm_color_attr,
+        )
     )
-    shape_enc = alt.value("circle") if vm_shape_attr == "(aucune)" else alt.Shape(f"{vm_shape_attr}:N", title=vm_shape_attr)
+    shape_enc = (
+        alt.value("circle")
+        if vm_shape_attr == "(aucune)"
+        else alt.Shape(f"{vm_shape_attr}:N", title=vm_shape_attr)
+    )
 
     def _axis_title(ax):
         if vm_method == "PCA":
@@ -2316,15 +2481,15 @@ elif page == "Valises marocaines":
 
     st.altair_chart(
         alt.Chart(vm_scores_df)
-          .mark_point(size=vm_point_size, opacity=0.9)
-          .encode(
-              x=alt.X(f"{vm_pc_x}:Q", title=_axis_title(vm_pc_x)),
-              y=alt.Y(f"{vm_pc_y}:Q", title=_axis_title(vm_pc_y)),
-              color=color_enc,
-              shape=shape_enc,
-              tooltip=tips,
-          )
-          .properties(height=900),
+        .mark_point(size=vm_point_size, opacity=0.9)
+        .encode(
+            x=alt.X(f"{vm_pc_x}:Q", title=_axis_title(vm_pc_x)),
+            y=alt.Y(f"{vm_pc_y}:Q", title=_axis_title(vm_pc_y)),
+            color=color_enc,
+            shape=shape_enc,
+            tooltip=tips,
+        )
+        .properties(height=900),
         use_container_width=True,
     )
 
@@ -2338,7 +2503,11 @@ elif page == "Valises marocaines":
         )
         if vm_method == "PCA":
             vm_load = vm_pca.components_.T
-            vm_load_df = pd.DataFrame(vm_load, index=vm_spec_cols_pca, columns=[f"PC{i}" for i in range(1, vm_n_comp+1)])
+            vm_load_df = pd.DataFrame(
+                vm_load,
+                index=vm_spec_cols_pca,
+                columns=[f"PC{i}" for i in range(1, vm_n_comp + 1)],
+            )
             if isinstance(vm_wls_pca, pd.Series) and not vm_wls_pca.empty:
                 vm_load_df.insert(0, "wavelength", vm_wls_pca.values)
             st.download_button(
@@ -2366,35 +2535,51 @@ elif page == "Valises marocaines":
         st.info("Distances indisponibles : moins de 2 colonnes spectrales détectées.")
         st.stop()
 
-    vm_group_candidates = [c for c in ["Savonnette", "Lot", "Localisation", "Logo"] if c in vm_out.columns]
+    vm_group_candidates = [
+        c for c in ["Savonnette", "Lot", "Localisation", "Logo"] if c in vm_out.columns
+    ]
     if not vm_group_candidates:
-        st.info("Aucun attribut de groupe trouvé parmi : Savonnette, Lot, Localisation, Logo.")
+        st.info(
+            "Aucun attribut de groupe trouvé parmi : Savonnette, Lot, Localisation, Logo."
+        )
         st.stop()
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        vm_group_attr = st.selectbox("Grouper par", vm_group_candidates, key="vm_var_group")
+        vm_group_attr = st.selectbox(
+            "Grouper par", vm_group_candidates, key="vm_var_group"
+        )
     with c2:
         vm_rep_mode = st.selectbox(
             "Représentant inter-groupe",
             ["Centroïde (moyenne)", "Médoïde (échantillon le + proche du centre)"],
-            0, key="vm_var_rep",
+            0,
+            key="vm_var_rep",
         )
     with c3:
         vm_point_cap = st.number_input(
             "Sous-échantillon max. (paires intra) pour affichage",
-            1000, 1_000_000, 200_000, 1000, key="vm_var_cap",
-            help="On sous-échantillonne aléatoirement les paires intra pour l'affichage si nécessaire."
+            1000,
+            1_000_000,
+            200_000,
+            1000,
+            key="vm_var_cap",
+            help="On sous-échantillonne aléatoirement les paires intra pour l'affichage si nécessaire.",
         )
 
     vm_sample_col2 = _find_col(["sample_name", "Sample"], vm_out.columns)
     vm_avg_before_dist = st.checkbox(
         "Moyenner les réplicas par sample avant calcul",
-        value=bool(vm_sample_col2), key="vm_var_avg",
+        value=bool(vm_sample_col2),
+        key="vm_var_avg",
     )
 
     vmD = vm_out.copy()
-    if "sample_name" not in vmD.columns and vm_sample_col2 and vm_sample_col2 in vmD.columns:
+    if (
+        "sample_name" not in vmD.columns
+        and vm_sample_col2
+        and vm_sample_col2 in vmD.columns
+    ):
         vmD["sample_name"] = vmD[vm_sample_col2].astype(str)
 
     Xm = vmD[vm_spec_cols_dist].apply(pd.to_numeric, errors="coerce")
@@ -2404,7 +2589,11 @@ elif page == "Valises marocaines":
 
     if vm_avg_before_dist and ("sample_name" in vmD.columns):
         gb = ["sample_name", vm_group_attr]
-        agg = vmD[gb + vm_spec_cols_dist].groupby(gb, as_index=False).mean(numeric_only=True)
+        agg = (
+            vmD[gb + vm_spec_cols_dist]
+            .groupby(gb, as_index=False)
+            .mean(numeric_only=True)
+        )
         vmD = agg
         Xm = vmD[vm_spec_cols_dist].copy()
 
@@ -2421,8 +2610,14 @@ elif page == "Valises marocaines":
         tri = np.triu_indices(n, 1)
         vals = D[tri]
         if vals.size:
-            vm_intra_parts.append(pd.DataFrame({"distance": vals, "type": "intra", "groupe": str(g)}))
-    vm_intra_df = pd.concat(vm_intra_parts, ignore_index=True) if vm_intra_parts else pd.DataFrame(columns=["distance","type","groupe"])
+            vm_intra_parts.append(
+                pd.DataFrame({"distance": vals, "type": "intra", "groupe": str(g)})
+            )
+    vm_intra_df = (
+        pd.concat(vm_intra_parts, ignore_index=True)
+        if vm_intra_parts
+        else pd.DataFrame(columns=["distance", "type", "groupe"])
+    )
 
     vm_intra_view = vm_intra_df.copy()
     if not vm_intra_df.empty and len(vm_intra_df) > vm_point_cap:
@@ -2448,18 +2643,24 @@ elif page == "Valises marocaines":
         R = np.vstack([r for _, r in reps])
         Dg = pairwise_distances(R)
         tri = np.triu_indices(len(reps), 1)
-        vm_inter_df = pd.DataFrame({
-            "distance": Dg[tri],
-            "type": "inter",
-            "groupe_pair": [f"{labels[i]} ⟷ {labels[j]}" for i, j in zip(*tri)]
-        })
+        vm_inter_df = pd.DataFrame(
+            {
+                "distance": Dg[tri],
+                "type": "inter",
+                "groupe_pair": [f"{labels[i]} ⟷ {labels[j]}" for i, j in zip(*tri)],
+            }
+        )
     else:
-        vm_inter_df = pd.DataFrame(columns=["distance","type","groupe_pair"])
+        vm_inter_df = pd.DataFrame(columns=["distance", "type", "groupe_pair"])
 
     vm_both = pd.concat(
         [
-            vm_intra_view[["distance","type"]].assign(detail=vm_intra_view.get("groupe")),
-            vm_inter_df[["distance","type"]].assign(detail=vm_inter_df.get("groupe_pair")),
+            vm_intra_view[["distance", "type"]].assign(
+                detail=vm_intra_view.get("groupe")
+            ),
+            vm_inter_df[["distance", "type"]].assign(
+                detail=vm_inter_df.get("groupe_pair")
+            ),
         ],
         ignore_index=True,
     )
@@ -2472,18 +2673,32 @@ elif page == "Valises marocaines":
     vm_both["type_label"] = vm_both["type"].map(lbl_map)
 
     # Récap
-    def _q1(s): return float(np.nanquantile(s, 0.25)) if s.count() else np.nan
-    def _q3(s): return float(np.nanquantile(s, 0.75)) if s.count() else np.nan
+    def _q1(s):
+        return float(np.nanquantile(s, 0.25)) if s.count() else np.nan
+
+    def _q3(s):
+        return float(np.nanquantile(s, 0.75)) if s.count() else np.nan
+
     vm_recap = (
         vm_both.groupby("type")["distance"]
-           .agg(n="count", min="min", q1=_q1, median="median", q3=_q3, max="max", mean="mean", std="std")
-           .reset_index()
+        .agg(
+            n="count",
+            min="min",
+            q1=_q1,
+            median="median",
+            q3=_q3,
+            max="max",
+            mean="mean",
+            std="std",
+        )
+        .reset_index()
     )
 
     # Histogrammes côte à côte (x catégoriel + xOffset)
     if not vm_both.empty:
         dmin, dmax = float(vm_both["distance"].min()), float(vm_both["distance"].max())
-        if dmax <= dmin: dmax = dmin + 1e-9
+        if dmax <= dmin:
+            dmax = dmin + 1e-9
         edges = np.linspace(dmin, dmax, 51)
         centers = (edges[:-1] + edges[1:]) / 2
         bin_labels = [f"{a:.2f}–{b:.2f}" for a, b in zip(edges[:-1], edges[1:])]
@@ -2494,20 +2709,34 @@ elif page == "Valises marocaines":
             n = max(1, len(vals))
             cnt, _ = np.histogram(vals, bins=edges)
             pct = cnt / n * 100.0
-            rows.append(pd.DataFrame({
-                "bin_label": bin_labels,
-                "bin_center": centers,
-                "pct": pct,
-                "type_label": lbl
-            }))
+            rows.append(
+                pd.DataFrame(
+                    {
+                        "bin_label": bin_labels,
+                        "bin_center": centers,
+                        "pct": pct,
+                        "type_label": lbl,
+                    }
+                )
+            )
         vm_hist = pd.concat(rows, ignore_index=True)
 
-        means = vm_both.groupby("type_label", as_index=False)["distance"].mean().rename(columns={"distance": "mean"})
+        means = (
+            vm_both.groupby("type_label", as_index=False)["distance"]
+            .mean()
+            .rename(columns={"distance": "mean"})
+        )
+
         def nearest_label(v):
             idx = int(np.clip(np.searchsorted(centers, v), 1, len(centers)) - 1)
             return bin_labels[idx]
+
         means["mean_label"] = means["mean"].apply(nearest_label)
-        ymax = vm_hist.groupby("type_label", as_index=False)["pct"].max().rename(columns={"pct":"ymax"})
+        ymax = (
+            vm_hist.groupby("type_label", as_index=False)["pct"]
+            .max()
+            .rename(columns={"pct": "ymax"})
+        )
         means = means.merge(ymax, on="type_label", how="left")
         means["label_y"] = means["ymax"].fillna(0) + 2
 
@@ -2515,37 +2744,45 @@ elif page == "Valises marocaines":
 
         bars = (
             alt.Chart(vm_hist)
-              .mark_bar(size=bar_size_px)
-              .encode(
-                  x=alt.X("bin_label:N", sort=bin_labels, title="Euclidean Distance (binned)",
-                          axis=alt.Axis(labelAngle=0)),
-                  y=alt.Y("pct:Q", title="Frequency (%)"),
-                  color=alt.Color("type_label:N", title="Legend"),
-                  xOffset=alt.XOffset("type_label:N"),
-                  tooltip=[
-                      alt.Tooltip("type_label:N", title="Type"),
-                      alt.Tooltip("bin_center:Q", title="Distance (center)", format=".2f"),
-                      alt.Tooltip("pct:Q", title="Frequency (%)", format=".2f"),
-                  ],
-              )
-              .properties(height=340)
+            .mark_bar(size=bar_size_px)
+            .encode(
+                x=alt.X(
+                    "bin_label:N",
+                    sort=bin_labels,
+                    title="Euclidean Distance (binned)",
+                    axis=alt.Axis(labelAngle=0),
+                ),
+                y=alt.Y("pct:Q", title="Frequency (%)"),
+                color=alt.Color("type_label:N", title="Legend"),
+                xOffset=alt.XOffset("type_label:N"),
+                tooltip=[
+                    alt.Tooltip("type_label:N", title="Type"),
+                    alt.Tooltip(
+                        "bin_center:Q", title="Distance (center)", format=".2f"
+                    ),
+                    alt.Tooltip("pct:Q", title="Frequency (%)", format=".2f"),
+                ],
+            )
+            .properties(height=340)
         )
 
         rules = (
             alt.Chart(means)
-              .mark_rule(strokeDash=[6, 4])
-              .encode(x=alt.X("mean_label:N", sort=bin_labels),
-                      color=alt.Color("type_label:N", legend=None))
+            .mark_rule(strokeDash=[6, 4])
+            .encode(
+                x=alt.X("mean_label:N", sort=bin_labels),
+                color=alt.Color("type_label:N", legend=None),
+            )
         )
         texts = (
             alt.Chart(means)
-              .mark_text(dy=-6)
-              .encode(
-                  x=alt.X("mean_label:N", sort=bin_labels),
-                  y=alt.Y("label_y:Q"),
-                  text=alt.Text("type_label:N"),
-                  color=alt.Color("type_label:N", legend=None),
-              )
+            .mark_text(dy=-6)
+            .encode(
+                x=alt.X("mean_label:N", sort=bin_labels),
+                y=alt.Y("label_y:Q"),
+                text=alt.Text("type_label:N"),
+                color=alt.Color("type_label:N", legend=None),
+            )
         )
 
         st.altair_chart(bars + rules + texts, use_container_width=True)
@@ -2556,21 +2793,23 @@ elif page == "Valises marocaines":
     if not vm_both.empty:
         box = (
             alt.Chart(vm_both)
-              .mark_boxplot(size=60)
-              .encode(
-                  x=alt.X("type_label:N", title=None),
-                  y=alt.Y("distance:Q", title="Euclidean Distance"),
-                  color=alt.Color("type_label:N", legend=None),
-                  tooltip=[alt.Tooltip("type_label:N"), alt.Tooltip("distance:Q")],
-              )
-              .properties(height=220)
+            .mark_boxplot(size=60)
+            .encode(
+                x=alt.X("type_label:N", title=None),
+                y=alt.Y("distance:Q", title="Euclidean Distance"),
+                color=alt.Color("type_label:N", legend=None),
+                tooltip=[alt.Tooltip("type_label:N"), alt.Tooltip("distance:Q")],
+            )
+            .properties(height=220)
         )
         st.altair_chart(box, use_container_width=True)
 
     # Tailles des groupes
     if vm_group_sizes:
-        vm_sizes_df = pd.DataFrame(sorted(vm_group_sizes.items(), key=lambda x: (-x[1], str(x[0]))),
-                                   columns=[vm_group_attr, "taille"])
+        vm_sizes_df = pd.DataFrame(
+            sorted(vm_group_sizes.items(), key=lambda x: (-x[1], str(x[0]))),
+            columns=[vm_group_attr, "taille"],
+        )
         with st.expander("Tailles des groupes"):
             st.dataframe(vm_sizes_df, use_container_width=True, height=260)
 
@@ -2578,13 +2817,25 @@ elif page == "Valises marocaines":
     with st.expander("⬇️ Exporter"):
         parts = []
         if not vm_intra_df.empty:
-            intra_exp = vm_intra_df.rename(columns={"groupe": "detail"}) if "groupe" in vm_intra_df.columns else vm_intra_df.assign(detail=np.nan)
+            intra_exp = (
+                vm_intra_df.rename(columns={"groupe": "detail"})
+                if "groupe" in vm_intra_df.columns
+                else vm_intra_df.assign(detail=np.nan)
+            )
             parts.append(intra_exp.loc[:, ["distance", "type", "detail"]])
         if not vm_inter_df.empty:
-            inter_exp = vm_inter_df.rename(columns={"groupe_pair": "detail"}) if "groupe_pair" in vm_inter_df.columns else vm_inter_df.assign(detail=np.nan)
+            inter_exp = (
+                vm_inter_df.rename(columns={"groupe_pair": "detail"})
+                if "groupe_pair" in vm_inter_df.columns
+                else vm_inter_df.assign(detail=np.nan)
+            )
             parts.append(inter_exp.loc[:, ["distance", "type", "detail"]])
 
-        export_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["distance", "type", "detail"])
+        export_df = (
+            pd.concat(parts, ignore_index=True)
+            if parts
+            else pd.DataFrame(columns=["distance", "type", "detail"])
+        )
 
         st.download_button(
             "Distances (CSV)",
@@ -2600,7 +2851,3 @@ elif page == "Valises marocaines":
             "text/csv",
             key="vm_var_dl_summary",
         )
-
-
-
-    
