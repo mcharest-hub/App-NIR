@@ -5,3 +5,5 @@ altair
 pydeck
 scikit-learn
 openpyxl
+plotly
+scipy
