@@ -11,8 +11,36 @@ import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
-import folium
-from streamlit_folium import st_folium
+# --- Basemap sans token (Carto) ---
+CARTO_BASEMAP = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+CARTO_RASTER_URL = "https://c.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png"
+
+def deck_with_fallback(layers, view_state, tooltip=None):
+    """
+    Construit un pdk.Deck avec Carto GL ; si cela échoue (env navigateur),
+    on ajoute un TileLayer raster et on désactive map_style (aucun token requis).
+    """
+    try:
+        return pdk.Deck(
+            layers=layers,
+            initial_view_state=view_state,
+            map_style=CARTO_BASEMAP,
+            tooltip=tooltip,
+        )
+    except Exception:
+        tile_layer = pdk.Layer(
+            "TileLayer",
+            data=CARTO_RASTER_URL,
+            minZoom=0,
+            maxZoom=19,
+            tileSize=256,
+        )
+        return pdk.Deck(
+            layers=[tile_layer] + layers,
+            initial_view_state=view_state,
+            map_style=None,
+            tooltip=tooltip,
+        )
 
 # ========== Préprocessing optionnel ==========
 sys.path.append(r"C:\Users\mcharest\Documents\Doctorat\python_scripts")
@@ -426,7 +454,7 @@ def render_cluster_detail_section(payload: Optional[dict] = None) -> None:
 
             # Poids net (somme par sample)
             weight_col = _find_weight_col(df_raw)
-            if weight_col is None and "Poids net" in df_raw.columns:
+            if weight_col is None and "Poids net" in getattr(df_raw, "columns", []):
                 weight_col = "Poids net"
             if weight_col and (weight_col in getattr(df_raw, "columns", [])):
                 wsub = df_raw[[sample_col, weight_col]].copy()
@@ -650,9 +678,9 @@ def render_cluster_detail_section(payload: Optional[dict] = None) -> None:
         ):
             st.info("Aucune date disponible pour ces échantillons.")
         else:
-            temp = subset_raw[
-                [sample_col, date_col_raw] + ([namex_col_raw] if namex_col_raw else [])
-            ].copy()
+            temp = subset_raw
+            cols_ = [sample_col, date_col_raw] + ([namex_col_raw] if namex_col_raw else [])
+            temp = temp[cols_].copy()
             temp[sample_col] = temp[sample_col].astype(str)
             temp[date_col_raw] = _parse_dates_series(temp[date_col_raw])
 
@@ -771,55 +799,13 @@ def render_cluster_detail_section(payload: Optional[dict] = None) -> None:
                     get_fill_color="_rgb",
                     pickable=True,
                 )
-                # --- Construction de la carte avec fallback Mapbox/OSM ---
-                layers = []
-                if BASEMAP_LAYER is not None:
-                    layers.append(BASEMAP_LAYER)  # ajoute le fond OSM si pas de token
-                layers.append(points_layer)  # ta couche de points ou heatmap
 
-                deck = pdk.Deck(
-                    layers=layers,
-                    initial_view_state=view_state,
-                    map_style=MAP_STYLE_ACTIVE,  # Mapbox si token, sinon None
-                    tooltip=(
-                        {"html": tooltip_html} if "tooltip_html" in locals() else None
-                    ),
+                deck = deck_with_fallback(
+                    [layer],
+                    view_state,
+                    {"html": tooltip_html} if tooltip_html else None,
                 )
-
-                # ---------- Carte sans Mapbox ----------
-                st.subheader("Carte des échantillons (OpenStreetMap)")
-
-                # Vérifie que les colonnes latitude/longitude existent
-                if "latitude" in out_vm.columns and "longitude" in out_vm.columns:
-                    # Calcul du centre de la carte
-                    lat_center = out_vm["latitude"].mean()
-                    lon_center = out_vm["longitude"].mean()
-
-                    # Crée la carte Folium
-                    m = folium.Map(
-                        location=[lat_center, lon_center],
-                        zoom_start=6,
-                        tiles="OpenStreetMap",
-                    )
-
-                    # Ajoute les points
-                    for _, row in out_vm.iterrows():
-                        folium.CircleMarker(
-                            location=[row["latitude"], row["longitude"]],
-                            radius=5,
-                            color="blue",
-                            fill=True,
-                            fill_opacity=0.6,
-                            popup=str(row.get("sample_name", "Inconnu")),
-                        ).add_to(m)
-
-                    # Affiche la carte dans Streamlit
-                    st_folium(m, width=900, height=600)
-                else:
-                    st.warning(
-                        "Colonnes 'latitude' et 'longitude' introuvables dans le dataset."
-                    )
-                # -----------------------------------------------------------
+                st.pydeck_chart(deck, use_container_width=True, height=520)
 
 
 # ========== Navigation ==========
@@ -1495,11 +1481,10 @@ elif page == "Carte":
         ),
     )
     st.pydeck_chart(
-        pdk.Deck(
-            layers=[layer],
-            initial_view_state=view_state,
-            map_style="mapbox://styles/mapbox/light-v9",
-            tooltip={"html": tooltip_html} if tooltip_html else None,
+        deck_with_fallback(
+            [layer],
+            view_state,
+            {"html": tooltip_html} if tooltip_html else None,
         ),
         use_container_width=True,
         height=800,
@@ -1820,6 +1805,7 @@ elif page == "Profilage":
         df_sub = out[out[namex_col].astype(str) == str(chosen_substance)].copy()
         if date_col_out and d1 and d2:
             df_sub[date_col_out] = _parse_dates_series(df_sub[date_col_out])
+            df_sub = df_sub
             df_sub = df_sub[
                 (df_sub[date_col_out] >= pd.to_datetime(d1))
                 & (df_sub[date_col_out] <= pd.to_datetime(d2))
