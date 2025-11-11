@@ -13,7 +13,10 @@ import streamlit as st
 
 # --- Basemap sans token (Carto) ---
 CARTO_BASEMAP = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
-CARTO_RASTER_URL = "https://c.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png"
+CARTO_RASTER_URL = (
+    "https://c.basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png"
+)
+
 
 def deck_with_fallback(layers, view_state, tooltip=None):
     """
@@ -41,6 +44,7 @@ def deck_with_fallback(layers, view_state, tooltip=None):
             map_style=None,
             tooltip=tooltip,
         )
+
 
 # ========== Préprocessing optionnel ==========
 sys.path.append(r"C:\Users\mcharest\Documents\Doctorat\python_scripts")
@@ -679,7 +683,9 @@ def render_cluster_detail_section(payload: Optional[dict] = None) -> None:
             st.info("Aucune date disponible pour ces échantillons.")
         else:
             temp = subset_raw
-            cols_ = [sample_col, date_col_raw] + ([namex_col_raw] if namex_col_raw else [])
+            cols_ = [sample_col, date_col_raw] + (
+                [namex_col_raw] if namex_col_raw else []
+            )
             temp = temp[cols_].copy()
             temp[sample_col] = temp[sample_col].astype(str)
             temp[date_col_raw] = _parse_dates_series(temp[date_col_raw])
@@ -951,25 +957,84 @@ elif page == "Statistiques":
             .reset_index(name="count")
             .sort_values("count", ascending=False)
         )
-        if not counts.empty:
+
+        if counts.empty:
+            st.info("Aucune substance à afficher.")
+        else:
+            counts[namex_col] = counts[namex_col].astype(str)
             counts["%"] = (counts["count"] / counts["count"].sum() * 100).round(2)
-            subs_order = counts[namex_col].astype(str).tolist()
+            subs_order = counts[namex_col].tolist()
+
+            # Palette cohérente
             cmap = _ensure_color_map(
                 subs_order, st.session_state.get("substance_colors", {}), PALETTE
             )
             st.session_state["substance_colors"] = cmap
 
-            col1, col2 = st.columns([1.2, 1])
-            with col1:
-                st.markdown("**Tableau des substances analysées**")
-                st.dataframe(counts, use_container_width=True, height=300)
-            with col2:
-                st.markdown("**Répartition (% des échantillons)**")
+            # --- Contrôles
+            col_ctrl1, col_ctrl2 = st.columns([1, 1])
+            with col_ctrl1:
+                chart_type = st.radio(
+                    "Type de graphique",
+                    ["Histogramme", "Circulaire"],
+                    horizontal=True,
+                    index=0,  # Histogramme par défaut
+                    key="subs_chart_type",
+                )
+            with col_ctrl2:
+                measure = st.radio(
+                    "Mesure",
+                    ["Nombre", "Pourcentage (%)"],
+                    horizontal=True,
+                    index=0,
+                    key="subs_measure",
+                )
+
+            # --- Tableau dans un expander
+            with st.expander("Tableau des statistiques par substance"):
+                st.dataframe(
+                    counts.rename(columns={"count": "Nombre", "%": "Pourcentage (%)"}),
+                    use_container_width=True,
+                    height=300,
+                )
+
+            # --- Graphique
+            if chart_type == "Histogramme":
+                y_field = "count" if measure == "Nombre" else "%"
+                y_title = (
+                    "Nombre d'échantillons" if measure == "Nombre" else "Proportion (%)"
+                )
+
+                st.altair_chart(
+                    alt.Chart(counts)
+                    .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                    .encode(
+                        x=alt.X(f"{namex_col}:N", sort=subs_order, title=namex_col),
+                        y=alt.Y(f"{y_field}:Q", title=y_title),
+                        color=alt.Color(
+                            f"{namex_col}:N",
+                            legend=None,
+                            scale=alt.Scale(
+                                domain=subs_order, range=[cmap[s] for s in subs_order]
+                            ),
+                        ),
+                        tooltip=[
+                            alt.Tooltip(f"{namex_col}:N", title="Substance"),
+                            alt.Tooltip("count:Q", title="Nombre"),
+                            alt.Tooltip("%:Q", title="Proportion (%)"),
+                        ],
+                    )
+                    .properties(height=360),
+                    use_container_width=True,
+                )
+
+            else:  # Camembert
+                theta_field = "count" if measure == "Nombre" else "%"
                 st.altair_chart(
                     alt.Chart(counts)
                     .mark_arc(outerRadius=150)
                     .encode(
-                        theta="count:Q",
+                        theta=alt.Theta(f"{theta_field}:Q"),
                         color=alt.Color(
                             f"{namex_col}:N",
                             sort=subs_order,
@@ -989,7 +1054,7 @@ elif page == "Statistiques":
                     use_container_width=True,
                 )
     else:
-        st.caption("Camembert ignoré (colonnes manquantes).")
+        st.caption("Section ignorée (colonnes manquantes).")
 
     st.markdown("---")
 
@@ -1769,10 +1834,35 @@ elif page == "Profilage":
         col1, col2 = st.columns(2)
         with col1:
             subs_options = sorted(out[namex_col].dropna().astype(str).unique())
-            chosen_substance = st.selectbox("Substance (name_x)", subs_options)
+
+            # index par défaut : "résine THC" (tolère accents/majuscules/espaces)
+            target_variants = {
+                "résine thc",
+                "resine thc",
+                "résine de thc",
+                "resine de thc",
+                "thc resin",
+            }
+            default_sub_idx = 0
+            for i, s in enumerate(subs_options):
+                if s.strip().casefold() in target_variants:
+                    default_sub_idx = i
+                    break
+
+            chosen_substance = st.selectbox(
+                "Substance (name_x)",
+                subs_options,
+                index=default_sub_idx,
+                key="dendro_substance",
+            )
+
         with col2:
+            methods = ["ward", "average", "complete", "single"]
             link_method = st.selectbox(
-                "Méthode de liaison", ["ward", "average", "complete", "single"], index=0
+                "Méthode de liaison",
+                methods,
+                index=methods.index("complete"),  # "complete" par défaut
+                key="dendro_linkage",
             )
 
         colA, colB = st.columns(2)
@@ -1867,7 +1957,7 @@ elif page == "Profilage":
         cluster_mode = st.radio(
             "Découpe",
             ["Par nombre de clusters (k)", "Par seuil de distance"],
-            horizontal=True,
+            horizontal=True, index=1,
         )
         if cluster_mode == "Par nombre de clusters (k)":
             k = st.slider(
